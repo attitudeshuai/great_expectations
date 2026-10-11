@@ -34,6 +34,10 @@ from great_expectations.datasource.fluent.batch_request import (
     BatchRequest,
     BatchParameters,
 )
+from great_expectations.datasource.fluent.batch_pagination import (
+    BatchIdentifiersCount,
+    BatchIdentifiersPage,
+)
 from great_expectations.datasource.fluent.bigquery_datasource import (
     BigQueryDatasource,
 )

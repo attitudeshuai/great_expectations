@@ -218,18 +218,86 @@ class FilePathDataConnector(DataConnector):
         else:
             return self._get_file_batch_definition_list(batch_request=batch_request)
 
-    def _get_file_batch_definition_list(
+    def _resolve_batching_regex(self, batch_request: BatchRequest) -> re.Pattern:
+        if batch_request.partitioner:
+            return self._preprocess_batching_regex(batch_request.partitioner.regex)
+        # all batch requests coming from the V1 API should have a regex; to support legacy code
+        # we fall back to the MATCH_ALL_PATTERN if it's missing.
+        return self._preprocess_batching_regex(MATCH_ALL_PATTERN)
+
+    def _is_data_references_cache_populated(self, batching_regex: re.Pattern) -> bool:
+        """Whether the data-reference cache for ``batching_regex`` already holds entries.
+
+        Mirrors the emptiness check in ``_get_data_references_cache``: an empty cache
+        entry is indistinguishable from a missing one and is (re)built on access.
+        """
+        return bool(self._data_references_cache.get(batching_regex))
+
+    def get_matched_batch_definitions(
         self, batch_request: BatchRequest
+    ) -> Tuple[List[LegacyBatchDefinition], bool]:
+        """Return the options-filtered, de-duplicated batch definitions matching a request.
+
+        Unlike ``get_batch_definition_list`` this does not apply the batch request's
+        ``batch_slice``; callers paginate the returned definitions themselves. Data
+        references are listed and cached once, in the existing manner, when the cache is
+        cold.
+
+        Returns:
+            A tuple of the matched batch definitions (in data-reference iteration order)
+            and a flag indicating whether the data-reference cache was reused.
+        """
+        if self._whole_directory_path_override:
+            return self._get_directory_batch_definition_list(batch_request=batch_request), False
+
+        batching_regex = self._resolve_batching_regex(batch_request)
+        data_reference_cache_hit = self._is_data_references_cache_populated(batching_regex)
+        batch_definition_list = self._get_file_batch_definition_list(
+            batch_request=batch_request, batching_regex=batching_regex
+        )
+        return batch_definition_list, data_reference_cache_hit
+
+    def get_matched_batch_definition_count(self, batch_request: BatchRequest) -> Tuple[int, bool]:
+        """Count the batch definitions matching a request without constructing new ones.
+
+        Only the cached data-reference map is inspected (a cold cache is built once in
+        the existing manner); no batch definitions or batch specs are constructed and no
+        batch data is read.
+
+        Returns:
+            A tuple of the matched batch-definition count and a flag indicating whether
+            the data-reference cache was reused.
+        """
+        if self._whole_directory_path_override:
+            return 1, False
+
+        batching_regex = self._resolve_batching_regex(batch_request)
+        data_reference_cache_hit = self._is_data_references_cache_populated(batching_regex)
+        batch_definitions_by_reference = self._get_data_references_cache(
+            batching_regex=batching_regex
+        )
+
+        count = 0
+        for mapped_batch_definitions in batch_definitions_by_reference.values():
+            if mapped_batch_definitions is not None and (
+                self._batch_definition_matches_batch_request(
+                    batch_definition=mapped_batch_definitions[0], batch_request=batch_request
+                )
+            ):
+                count += 1
+
+        return count, data_reference_cache_hit
+
+    def _get_file_batch_definition_list(
+        self,
+        batch_request: BatchRequest,
+        batching_regex: Optional[re.Pattern] = None,
     ) -> list[LegacyBatchDefinition]:
         # Use a combination of a list and set to preserve iteration order
         batch_definition_list: list[LegacyBatchDefinition] = list()
         batch_definition_set = set()
-        if batch_request.partitioner:
-            batching_regex = self._preprocess_batching_regex(batch_request.partitioner.regex)
-        else:
-            # all batch requests coming from the V1 API should have a regex; to support legacy code
-            # we fall back to the MATCH_ALL_PATTERN if it's missing.
-            batching_regex = self._preprocess_batching_regex(MATCH_ALL_PATTERN)
+        if batching_regex is None:
+            batching_regex = self._resolve_batching_regex(batch_request)
         for batch_definition in self._get_batch_definitions(batching_regex=batching_regex):
             if (
                 self._batch_definition_matches_batch_request(

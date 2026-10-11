@@ -127,22 +127,47 @@ class DirectoryDataAsset(PathDataAsset[DatasourceT, ColumnPartitioner], ABC, Gen
         if batch_request.partitioner:
             # Currently non-sql asset partitioners do not introspect the datasource for available
             # batches and only return a single batch based on specified batch_identifiers.
-            batch_identifiers = batch_request.options
-            if not batch_identifiers.get("path"):
-                batch_identifiers["path"] = self.data_directory
+            return [self._build_whole_directory_partitioned_batch_definition(batch_request)]
 
-            batch_definition = LegacyBatchDefinition(
-                datasource_name=self._data_connector.datasource_name,
-                data_connector_name=_DATA_CONNECTOR_NAME,
-                data_asset_name=self._data_connector.data_asset_name,
-                batch_identifiers=make_batch_identifier(batch_identifiers),
-            )
-            batch_definition_list = [batch_definition]
-        else:
-            batch_definition_list = self._data_connector.get_batch_definition_list(
-                batch_request=batch_request
-            )
+        batch_definition_list = self._data_connector.get_batch_definition_list(
+            batch_request=batch_request
+        )
         return batch_definition_list
+
+    def _build_whole_directory_partitioned_batch_definition(
+        self, batch_request: BatchRequest
+    ) -> LegacyBatchDefinition:
+        # Currently non-sql asset partitioners do not introspect the datasource for available
+        # batches and only return a single batch based on specified batch_identifiers.
+        batch_identifiers = batch_request.options
+        if not batch_identifiers.get("path"):
+            batch_identifiers["path"] = self.data_directory
+
+        return LegacyBatchDefinition(
+            datasource_name=self._data_connector.datasource_name,
+            data_connector_name=_DATA_CONNECTOR_NAME,
+            data_asset_name=self._data_connector.data_asset_name,
+            batch_identifiers=make_batch_identifier(batch_identifiers),
+        )
+
+    @override
+    def _get_matched_batch_definitions_for_enumeration(
+        self,
+        batch_request: BatchRequest,
+    ) -> tuple[list[LegacyBatchDefinition], bool]:
+        if batch_request.partitioner:
+            return [self._build_whole_directory_partitioned_batch_definition(batch_request)], False
+        return super()._get_matched_batch_definitions_for_enumeration(batch_request)
+
+    @override
+    def _get_matched_batch_definition_count_for_enumeration(
+        self,
+        batch_request: BatchRequest,
+    ) -> tuple[int, bool]:
+        # Whole-directory assets always resolve to a single batch.
+        if batch_request.partitioner:
+            return 1, False
+        return super()._get_matched_batch_definition_count_for_enumeration(batch_request)
 
     @singledispatchmethod
     def _get_dataframe_partitioner(self, partitioner) -> Optional[DataframePartitioner]: ...

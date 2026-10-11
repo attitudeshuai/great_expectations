@@ -44,6 +44,11 @@ from great_expectations.compatibility.typing_extensions import override
 from great_expectations.core.batch_definition import BatchDefinition, PartitionerT
 from great_expectations.core.config_substitutor import _ConfigurationSubstitutor
 from great_expectations.core.result_format import DEFAULT_RESULT_FORMAT
+from great_expectations.datasource.fluent.batch_pagination import (
+    BatchIdentifiersCount,
+    BatchIdentifiersPage,
+    paginate_batch_identifiers,
+)
 from great_expectations.datasource.fluent.constants import (
     _ASSETS_KEY,
 )
@@ -374,6 +379,57 @@ class DataAsset(GenericBaseModel, ABC, Generic[DatasourceT, PartitionerT]):
 
     @abstractmethod
     def get_batch_identifiers_list(self, batch_request: BatchRequest) -> List[dict]: ...
+
+    @public_api
+    def get_batch_identifiers_page(
+        self,
+        batch_request: BatchRequest,
+        page_size: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_total_count: bool = False,
+    ) -> BatchIdentifiersPage:
+        """Get a single page of batch identifiers matching the batch request.
+
+        Pages preserve the ordering of :meth:`get_batch_identifiers_list`: concatenating
+        every page (following ``next_cursor``) yields the same identifiers in the same
+        order.
+
+        Args:
+            batch_request: A batch request object describing the matched batches.
+            page_size: Maximum number of batch identifiers on this page. When ``None``
+                (the default) every match is returned in one page and the result is
+                equivalent to :meth:`get_batch_identifiers_list`. Must be a positive
+                integer no larger than the configured maximum.
+            cursor: The ``next_cursor`` value returned with the previous page. Omit to
+                start at the first page. Malformed or stale cursors raise
+                ``InvalidPageCursorError`` rather than silently restarting.
+            include_total_count: When ``True``, populate ``total_count`` on the returned
+                page.
+
+        Returns:
+            A :class:`BatchIdentifiersPage` containing the page's batch identifiers,
+            paging metadata and (optionally) the total matched count.
+        """
+        batch_identifiers_list = self.get_batch_identifiers_list(batch_request)
+        return paginate_batch_identifiers(
+            batch_identifiers=batch_identifiers_list,
+            page_size=page_size,
+            cursor=cursor,
+            include_total_count=include_total_count,
+        )
+
+    @public_api
+    def get_batch_identifiers_count(self, batch_request: BatchRequest) -> BatchIdentifiersCount:
+        """Count the batches matching the batch request without fetching batch data.
+
+        Args:
+            batch_request: A batch request object describing the matched batches.
+
+        Returns:
+            A :class:`BatchIdentifiersCount` containing the matched count. Asset types
+            backed by a data-reference cache also report whether the cache was reused.
+        """
+        return BatchIdentifiersCount(count=len(self.get_batch_identifiers_list(batch_request)))
 
     @abstractmethod
     def get_batch(self, batch_request: BatchRequest) -> Batch: ...
@@ -806,6 +862,35 @@ class Datasource(
     def get_batch_identifiers_list(self, batch_request: BatchRequest) -> List[dict]:
         data_asset = self.get_asset(batch_request.data_asset_name)
         return data_asset.get_batch_identifiers_list(batch_request)
+
+    @public_api
+    def get_batch_identifiers_page(
+        self,
+        batch_request: BatchRequest,
+        page_size: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_total_count: bool = False,
+    ) -> BatchIdentifiersPage:
+        """Get a single page of batch identifiers matching the batch request.
+
+        See :meth:`DataAsset.get_batch_identifiers_page` for details.
+        """
+        data_asset = self.get_asset(batch_request.data_asset_name)
+        return data_asset.get_batch_identifiers_page(
+            batch_request=batch_request,
+            page_size=page_size,
+            cursor=cursor,
+            include_total_count=include_total_count,
+        )
+
+    @public_api
+    def get_batch_identifiers_count(self, batch_request: BatchRequest) -> BatchIdentifiersCount:
+        """Count the batches matching the batch request without fetching batch data.
+
+        See :meth:`DataAsset.get_batch_identifiers_count` for details.
+        """
+        data_asset = self.get_asset(batch_request.data_asset_name)
+        return data_asset.get_batch_identifiers_count(batch_request)
 
     def get_assets_as_dict(self) -> MutableMapping[str, _DataAssetT]:
         """Returns available DataAsset objects as dictionary, with corresponding name as key.

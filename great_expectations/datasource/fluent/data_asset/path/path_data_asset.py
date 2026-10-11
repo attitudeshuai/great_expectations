@@ -18,6 +18,11 @@ import great_expectations.exceptions as gx_exceptions
 from great_expectations.compatibility import pydantic
 from great_expectations.compatibility.typing_extensions import override
 from great_expectations.core.batch_definition import PartitionerT
+from great_expectations.datasource.fluent.batch_pagination import (
+    BatchIdentifiersCount,
+    BatchIdentifiersPage,
+    paginate_batch_identifiers,
+)
 from great_expectations.datasource.fluent.batch_request import (
     BatchRequest,
 )
@@ -128,6 +133,66 @@ class PathDataAsset(DataAsset, ABC, Generic[DatasourceT, PartitionerT]):
             )
 
         return batch_identifiers_list
+
+    def _get_matched_batch_definitions_for_enumeration(
+        self,
+        batch_request: BatchRequest,
+    ) -> tuple[list[LegacyBatchDefinition], bool]:
+        """Return the matched batch definitions in data-reference iteration order.
+
+        The second return value reports whether the data-reference cache was reused.
+        Subclasses with bespoke enumeration paths (e.g. whole-directory assets) override
+        this hook.
+        """
+        return self._data_connector.get_matched_batch_definitions(batch_request)
+
+    def _get_matched_batch_definition_count_for_enumeration(
+        self,
+        batch_request: BatchRequest,
+    ) -> tuple[int, bool]:
+        """Return the matched batch-definition count without constructing batch defs."""
+        return self._data_connector.get_matched_batch_definition_count(batch_request)
+
+    @override
+    def get_batch_identifiers_page(
+        self,
+        batch_request: BatchRequest,
+        page_size: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_total_count: bool = False,
+    ) -> BatchIdentifiersPage:
+        self._validate_batch_request(batch_request)
+
+        batch_definition_list, data_reference_cache_hit = (
+            self._get_matched_batch_definitions_for_enumeration(batch_request)
+        )
+        batch_identifiers_list: List[dict] = [
+            batch_definition.batch_identifiers for batch_definition in batch_definition_list
+        ]
+        if sortable_partitioner := self._get_sortable_partitioner(batch_request.partitioner):
+            batch_identifiers_list = self.sort_batch_identifiers_list(
+                batch_identifiers_list, sortable_partitioner
+            )
+
+        return paginate_batch_identifiers(
+            batch_identifiers=batch_identifiers_list,
+            page_size=page_size,
+            cursor=cursor,
+            include_total_count=include_total_count,
+            data_reference_cache_hit=data_reference_cache_hit,
+        )
+
+    @override
+    def get_batch_identifiers_count(self, batch_request: BatchRequest) -> BatchIdentifiersCount:
+        self._validate_batch_request(batch_request)
+
+        count, data_reference_cache_hit = self._get_matched_batch_definition_count_for_enumeration(
+            batch_request
+        )
+        return BatchIdentifiersCount(
+            count=count,
+            data_reference_cache_hit=data_reference_cache_hit,
+        )
 
     @override
     def get_batch(self, batch_request: BatchRequest) -> Batch:

@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 METHOD_SHOULD_RAISE_ERROR: Final[set] = {
     "get_batch",
     "get_batch_identifiers_list",
+    "get_batch_identifiers_page",
+    "get_batch_identifiers_count",
     "add_batch_definition",
 }
 

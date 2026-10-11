@@ -22,6 +22,10 @@ from great_expectations.exceptions import (
 )
 
 if TYPE_CHECKING:
+    from great_expectations.datasource.fluent.batch_pagination import (
+        BatchIdentifiersCount,
+        BatchIdentifiersPage,
+    )
     from great_expectations.datasource.fluent.batch_request import (
         BatchParameters,
         BatchRequest,
@@ -122,6 +126,64 @@ class BatchDefinition(pydantic.GenericModel, Generic[PartitionerT]):
         """
         batch_request = self.build_batch_request(batch_parameters=batch_parameters)
         return self.data_asset.get_batch_identifiers_list(batch_request)
+
+    @public_api
+    def get_batch_identifiers_page(
+        self,
+        batch_parameters: Optional[BatchParameters] = None,
+        page_size: Optional[int] = None,
+        cursor: Optional[str] = None,
+        include_total_count: bool = False,
+    ) -> BatchIdentifiersPage:
+        """
+        Retrieves a single page of available batch identifiers.
+
+        Pages use the same ordering as :meth:`get_batch_identifiers_list`; following the
+        ``next_cursor`` returned on each page covers every matching batch without
+        duplicates or gaps.
+
+        Args:
+            batch_parameters: Additional parameters to be used in fetching the batch identifiers
+                list. Numeric batch parameters (e.g. year, month, day) take integer values;
+                digit-string values are still accepted but are deprecated and emit a warning,
+                with support for them removed in 2.0.
+            page_size: Maximum number of batch identifiers on this page. When ``None``, every
+                match is returned in one page. Must be a positive integer within the configured
+                maximum.
+            cursor: The ``next_cursor`` value returned with the previous page; omit for the
+                first page. Malformed or stale cursors raise an error.
+            include_total_count: When ``True``, populate ``total_count`` on the returned page.
+
+        Returns:
+            A page of batch identifiers along with paging metadata.
+        """
+        batch_request = self.build_batch_request(batch_parameters=batch_parameters)
+        return self.data_asset.get_batch_identifiers_page(
+            batch_request=batch_request,
+            page_size=page_size,
+            cursor=cursor,
+            include_total_count=include_total_count,
+        )
+
+    @public_api
+    def get_batch_identifiers_count(
+        self,
+        batch_parameters: Optional[BatchParameters] = None,
+    ) -> BatchIdentifiersCount:
+        """
+        Retrieves the number of available batches without fetching batch data.
+
+        Args:
+            batch_parameters: Additional parameters to be used when counting matching
+                batches. Numeric batch parameters (e.g. year, month, day) take integer values;
+                digit-string values are still accepted but are deprecated and emit a warning,
+                with support for them removed in 2.0.
+
+        Returns:
+            A count of the batches matching the batch parameters.
+        """
+        batch_request = self.build_batch_request(batch_parameters=batch_parameters)
+        return self.data_asset.get_batch_identifiers_count(batch_request)
 
     def is_fresh(self) -> BatchDefinitionFreshnessDiagnostics:
         diagnostics = self._is_added()
