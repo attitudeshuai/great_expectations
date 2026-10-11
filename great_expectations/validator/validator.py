@@ -9,7 +9,7 @@ import logging
 import traceback
 import warnings
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -53,6 +53,14 @@ from great_expectations.expectations.registry import (
 )
 from great_expectations.util import convert_to_json_serializable  # noqa: TID251 # FIXME CoP
 from great_expectations.validator.exception_info import ExceptionInfo
+from great_expectations.validator.metric_dependency_diagnostics import (
+    CATEGORY_EXPECTATION_ERROR,
+    DiagnosticFailureEntry,
+    ExpectationErrorInfo,
+    MetricDependencyDiagnosticsConfig,
+    MetricDependencyDiagnosticsError,
+    MetricDependencyReport,
+)
 from great_expectations.validator.metrics_calculator import (
     MetricsCalculator,
     _AbortedMetricsInfoDict,
@@ -700,6 +708,136 @@ class Validator:
 
         return evrs
 
+    def diagnose_metric_dependencies(  # noqa: C901, PLR0912, PLR0913 # FIXME CoP
+        self,
+        expectation_configurations: Optional[List[ExpectationConfiguration]] = None,
+        expectation_suite: Optional[ExpectationSuite] = None,
+        metric_configurations: Optional[List[MetricConfiguration]] = None,
+        runtime_configuration: Optional[dict] = None,
+        diagnostics_config: Optional[MetricDependencyDiagnosticsConfig] = None,
+        resolve_metrics: Optional[bool] = None,
+    ) -> MetricDependencyReport:
+        """Read-only diagnostics for the metric dependency graph of one validation.
+
+        Accepts an ExpectationSuite ("校验定义") and/or a list of
+        ExpectationConfiguration ("一套期望"), or a list of MetricConfiguration
+        directly. Produces no data, changes no validation result, and never
+        pollutes the execution engine cache.
+
+        Args:
+            expectation_configurations: Expectation configurations to describe.
+            expectation_suite: Suite whose expectations are described.
+            metric_configurations: Explicit root metrics to describe.
+            runtime_configuration: Additional run-time settings; diagnostics
+                options may also be supplied via its keys.
+            diagnostics_config: Explicit diagnostics options (depth limit, cycle
+                policy, exception isolation, exception consolidation).
+            resolve_metrics: When ``True`` the graph is also solved against the
+                loaded data; when ``None``/``False`` only structure and
+                structural satisfiability are reported.
+
+        Returns:
+            A ``MetricDependencyReport`` with all nodes, edges, cycles,
+            unsatisfiable dependencies, provider errors, truncated branches and
+            (optionally) resolution outcome.
+        """  # FIXME CoP
+        if diagnostics_config is None:
+            config = MetricDependencyDiagnosticsConfig.from_runtime_configuration(
+                runtime_configuration=runtime_configuration,
+            )
+        else:
+            config = replace(diagnostics_config)
+        if resolve_metrics is not None:
+            config = replace(config, resolve_metrics=resolve_metrics)
+        config.validate()
+
+        gathered_expectation_configurations: List[ExpectationConfiguration] = []
+        if expectation_suite is not None:
+            gathered_expectation_configurations.extend(expectation_suite.expectation_configurations)
+        if expectation_configurations:
+            gathered_expectation_configurations.extend(expectation_configurations)
+
+        root_metric_configurations: List[MetricConfiguration] = list(metric_configurations or [])
+        expectation_errors: List[ExpectationErrorInfo] = []
+        isolate_failures = config.catch_exceptions or config.consolidate_exceptions
+
+        configuration: ExpectationConfiguration
+        for configuration in gathered_expectation_configurations:
+            evaluated_config = copy.deepcopy(configuration)
+            if self.active_batch_id:
+                evaluated_config.kwargs.update({"batch_id": self.active_batch_id})
+            try:
+                expectation = evaluated_config.to_domain_obj()
+                validation_dependencies: ValidationDependencies = (
+                    expectation.get_validation_dependencies(
+                        execution_engine=self._execution_engine,
+                        runtime_configuration=runtime_configuration,
+                    )
+                )
+                root_metric_configurations.extend(
+                    validation_dependencies.get_metric_configurations()
+                )
+            except Exception as err:
+                if not isolate_failures:
+                    raise
+                expectation_errors.append(
+                    ExpectationErrorInfo(
+                        expectation_type=getattr(configuration, "type", None),
+                        error_type=type(err).__name__,
+                        error_message=f"{type(err).__name__}: {err!s}",
+                    )
+                )
+
+        try:
+            report: MetricDependencyReport = self._metrics_calculator.diagnose_metric_dependencies(
+                metric_configurations=root_metric_configurations,
+                runtime_configuration=runtime_configuration,
+                diagnostics_config=config,
+            )
+        except MetricDependencyDiagnosticsError as err:
+            if config.consolidate_exceptions and expectation_errors:
+                err.failures.extend(
+                    self._expectation_error_failure_entries(expectation_errors=expectation_errors)
+                )
+                err.args = (
+                    str(err)
+                    + "\n"
+                    + "\n".join(
+                        f"- [{CATEGORY_EXPECTATION_ERROR}] {item.error_type}: {item.error_message}"
+                        for item in expectation_errors
+                    ),
+                )
+            raise
+
+        report.expectation_errors = expectation_errors
+
+        if not config.catch_exceptions and config.consolidate_exceptions:
+            if expectation_errors:
+                failures = self._expectation_error_failure_entries(
+                    expectation_errors=expectation_errors
+                )
+                message = (
+                    "Metric dependency diagnostics found "
+                    f"{len(failures)} expectation failure(s):\n"
+                    + "\n".join(f"- [{failure.category}] {failure.message}" for failure in failures)
+                )
+                raise MetricDependencyDiagnosticsError(message=message, failures=failures)
+
+        return report
+
+    @staticmethod
+    def _expectation_error_failure_entries(
+        expectation_errors: List[ExpectationErrorInfo],
+    ) -> List[DiagnosticFailureEntry]:
+        return [
+            DiagnosticFailureEntry(
+                category=CATEGORY_EXPECTATION_ERROR,
+                metric_id=None,
+                message=(f"{item.expectation_type}: {item.error_type}: {item.error_message}"),
+            )
+            for item in expectation_errors
+        ]
+
     def _generate_metric_dependency_subgraphs_for_each_expectation_configuration(
         self,
         expectation_configurations: List[ExpectationConfiguration],
@@ -785,6 +923,16 @@ class Validator:
             )
         )
         validation_graph = ValidationGraph(execution_engine=self._execution_engine, edges=edges)
+
+        # Merge expansion-time diagnostics collected on the expectation-level
+        # sub-graphs so suite-level resolution can classify deadlocks correctly.
+        for expectation_validation_graph in expectation_validation_graphs:
+            sub_graph = expectation_validation_graph.graph
+            validation_graph._self_dependency_ids.update(sub_graph.self_dependency_ids)
+            validation_graph._expansion_errors.update(sub_graph.expansion_errors)
+            validation_graph._truncated_metric_infos.update(sub_graph.truncated_metric_infos)
+            validation_graph._expanded_metric_ids.update(sub_graph.expanded_metric_ids)
+
         return validation_graph
 
     def _resolve_suite_level_graph_and_process_metric_evaluation_errors(  # noqa: PLR0913 # FIXME CoP

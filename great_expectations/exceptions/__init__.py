@@ -41,6 +41,7 @@ from .exceptions import (
     InvalidMetricAccessorDomainKwargsKeyError,
     InvalidTopLevelConfigKeyError,
     MetricComputationError,
+    MetricDependencyCycleError,
     MetricError,
     MetricProviderError,
     MetricResolutionError,

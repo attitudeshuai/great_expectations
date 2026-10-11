@@ -444,6 +444,21 @@ class MetricResolutionError(MetricError):
         self.failed_metrics = failed_metrics
 
 
+class MetricDependencyCycleError(MetricError):
+    """Raised when metric dependency expansion encounters one or more cycles.
+
+    A self-dependency is always skipped during expansion (legacy behavior); this
+    exception is only raised when the ``on_cycle`` policy is ``"raise"`` and a
+    cycle with more than one participating metric is detected.
+    """
+
+    def __init__(self, message, cycle_paths) -> None:
+        super().__init__(message)
+        if not isinstance(cycle_paths, Iterable):
+            cycle_paths = (cycle_paths,)
+        self.cycle_paths = tuple(cycle_paths)
+
+
 class GXCloudError(GreatExpectationsError):
     """
     Generic error used to provide additional context around Cloud-specific issues.
