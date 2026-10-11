@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Iterable
+import datetime
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Union
 
 from great_expectations._docs_decorators import public_api
 from great_expectations.compatibility.pydantic import ValidationError as PydanticValidationError
 from great_expectations.compatibility.typing_extensions import override
 from great_expectations.core import ExpectationSuite
 from great_expectations.core.factory.factory import Factory
-from great_expectations.data_context.data_context.context_factory import project_manager
+from great_expectations.core.suite_change_management import (
+    ChangeSource,
+    SuiteChangeManagementConfig,
+    SuiteChangeManager,
+    SuiteChangePreview,
+    SuiteVersionRecord,
+    SuiteVersionSummary,
+)
 from great_expectations.exceptions import DataContextError
 
 if TYPE_CHECKING:
@@ -20,12 +28,88 @@ class SuiteFactory(Factory[ExpectationSuite]):
     Responsible for basic CRUD operations on a Data Context's ExpectationSuites.
     """
 
-    def __init__(self, store: ExpectationsStore):
+    def __init__(
+        self,
+        store: ExpectationsStore,
+        change_management: Optional[Union[SuiteChangeManagementConfig, dict]] = None,
+    ):
         self._store = store
+        config = self._coerce_config(change_management)
+        # Validation (including the retention_limit > 0 rule) happens while the
+        # SuiteFactory is being constructed.
+        self._change_manager = SuiteChangeManager(store=store, config=config)
+
+    @staticmethod
+    def _coerce_config(
+        change_management: Optional[Union[SuiteChangeManagementConfig, dict]],
+    ) -> SuiteChangeManagementConfig:
+        if change_management is None:
+            return SuiteChangeManagementConfig()
+        if isinstance(change_management, SuiteChangeManagementConfig):
+            return change_management
+        if isinstance(change_management, dict):
+            return SuiteChangeManagementConfig(**change_management)
+        raise ValueError(  # noqa: TRY003
+            "change_management must be a SuiteChangeManagementConfig, a dict of its "
+            f"fields, or None; got {type(change_management).__name__}."
+        )
 
     @property
-    def _include_rendered_content(self) -> bool:
-        return project_manager.is_using_cloud()
+    def change_management(self) -> SuiteChangeManagementConfig:
+        """The active change preview / version retention configuration."""
+        return self._change_manager.config
+
+    @public_api
+    def configure_change_management(
+        self, change_management: Union[SuiteChangeManagementConfig, dict]
+    ) -> None:
+        """Enable or reconfigure change preview and historical version retention.
+
+        Args:
+            change_management: A ``SuiteChangeManagementConfig`` or a dict of its
+                fields. A ``retention_limit`` of 0 is rejected.
+        """
+        self._change_manager.configure(self._coerce_config(change_management))
+
+    @public_api
+    def preview_changes(self, suite: ExpectationSuite) -> SuiteChangePreview:
+        """Preview the per-expectation diff of writing ``suite`` over the stored one.
+
+        Read-only: nothing is written and no in-memory state is mutated. The four
+        change categories (added / removed / modified / unchanged) and their
+        ordering are deterministic for a given pair of inputs.
+        """
+        return self._change_manager.preview(pending=suite)
+
+    @public_api
+    def get_versions(self, name: str) -> list[SuiteVersionSummary]:
+        """List retained historical versions of a suite, oldest first."""
+        return self._change_manager.list_versions(name)
+
+    @public_api
+    def get_version(
+        self,
+        name: str,
+        version: Optional[int] = None,
+        at: Union[datetime.datetime, str, None] = None,
+    ) -> SuiteVersionRecord:
+        """Get one retained historical version by version number or point in time."""
+        return self._change_manager.get_version(name, version=version, at=at)
+
+    @public_api
+    def rollback(
+        self,
+        name: str,
+        version: Optional[int] = None,
+        at: Union[datetime.datetime, str, None] = None,
+        source: str = ChangeSource.ROLLBACK,
+    ) -> ExpectationSuite:
+        """Restore a retained historical version as the current version.
+
+        The version being replaced is itself retained (tagged with
+        ``operation="rollback"``), so a rollback can be rolled back again.
+        """
+        return self._change_manager.rollback(name, version=version, at=at, source=source)
 
     @public_api
     @override
@@ -66,8 +150,19 @@ class SuiteFactory(Factory[ExpectationSuite]):
                 f"Cannot delete ExpectationSuite with name {name} because it cannot be found."
             ) from e
 
+        token = None
+        if self._change_manager.enabled:
+            token = self._change_manager.begin_delete(
+                current=suite, source=ChangeSource.DELETE_SUITE
+            )
+
         key = self._store.get_key(name=suite.name, id=suite.id)
-        self._store.remove_key(key=key)
+        try:
+            self._store.remove_key(key=key)
+        except Exception:
+            self._change_manager.discard(token)
+            raise
+        self._change_manager.commit(token)
 
     @public_api
     @override
@@ -119,6 +214,10 @@ class SuiteFactory(Factory[ExpectationSuite]):
         match a previously existing Expectation maintain a stable ID, and
         Expectations which have changed receive a new ID.
 
+        When change management is enabled, the previous version is retained
+        before the overwrite and any references affected by the change are
+        recorded.
+
         Args:
             suite: ExpectationSuite to add or update
         """
@@ -127,17 +226,36 @@ class SuiteFactory(Factory[ExpectationSuite]):
         except DataContextError:
             return self.add(suite=suite)
 
-        # add IDs to expectations that haven't changed
-        existing_expectations = existing_suite.expectations
-        for expectation in suite.expectations:
-            try:
-                index = existing_expectations.index(expectation)
-                expectation.id = existing_expectations[index].id
-            except ValueError:
-                pass  # expectation is new or updated
+        token = None
+        if self._change_manager.enabled:
+            # Raises on conflict_policy="raise" before anything is mutated.
+            token = self._change_manager.begin_write(
+                pending=suite,
+                current=existing_suite,
+                source=ChangeSource.ADD_OR_UPDATE,
+            )
 
-        suite.id = existing_suite.id
-        suite.save()
+        try:
+            # add IDs to expectations that haven't changed
+            existing_expectations = existing_suite.expectations
+            for expectation in suite.expectations:
+                try:
+                    index = existing_expectations.index(expectation)
+                    expectation.id = existing_expectations[index].id
+                except ValueError:
+                    pass  # expectation is new or updated
 
-        # Re-fetch so the returned object matches what was persisted.
-        return self.get(name=suite.name)
+            suite.id = existing_suite.id
+            # suite.save() has its own retention hook; the factory owns the
+            # single snapshot for this overwrite.
+            with self._change_manager.suppressed():
+                suite.save()
+
+            # Re-fetch so the returned object matches what was persisted.
+            result = self.get(name=suite.name)
+        except Exception:
+            self._change_manager.discard(token)
+            raise
+
+        self._change_manager.commit(token)
+        return result

@@ -27,6 +27,10 @@ from great_expectations.core.freshness_diagnostics import (
     ExpectationSuiteFreshnessDiagnostics,
 )
 from great_expectations.core.serdes import _IdentifierBundle
+from great_expectations.core.suite_change_management import (
+    ChangeSource,
+    SuiteChangeManager,
+)
 from great_expectations.data_context.data_context.context_factory import project_manager
 from great_expectations.exceptions import (
     ExpectationSuiteError,
@@ -144,7 +148,24 @@ class ExpectationSuite(SerializableDictDot):
         if not already_added:
             # suite is a set-like collection, so don't add if it not unique
             if should_save_expectation:
-                expectation = self._store.add_expectation(suite=self, expectation=expectation)
+                change_manager = self._get_change_manager()
+                token = None
+                if change_manager is not None:
+                    # The new expectation is not in self yet, so build the
+                    # prospective post-write view solely for the preview/snapshot.
+                    prospective = deepcopy(self)
+                    prospective.expectations.append(expectation)
+                    token = change_manager.begin_write(
+                        pending=prospective,
+                        current=change_manager.get_current(self.name),
+                        source=ChangeSource.ADD_EXPECTATION,
+                    )
+                try:
+                    expectation = self._store.add_expectation(suite=self, expectation=expectation)
+                except Exception:
+                    change_manager.discard(token) if change_manager else None
+                    raise
+                change_manager.commit(token) if change_manager else None
             self.expectations.append(expectation)
 
         expectation.register_save_callback(save_callback=self._save_expectation)
@@ -222,13 +243,25 @@ class ExpectationSuite(SerializableDictDot):
 
         if self._has_been_saved():
             # only persist on delete if the suite has already been saved
+            change_manager = self._get_change_manager()
+            token = None
+            if change_manager is not None:
+                # self already reflects the prospective post-delete state while
+                # the stored suite (current) still contains the expectation.
+                token = change_manager.begin_write(
+                    pending=self,
+                    current=change_manager.get_current(self.name),
+                    source=ChangeSource.DELETE_EXPECTATION,
+                )
             try:
                 self._store.delete_expectation(suite=self, expectation=expectation)
             except Exception as exc:
                 # rollback this change
                 # expectation suite is set-like so order of expectations doesn't matter
+                change_manager.discard(token) if change_manager else None
                 self.expectations.append(expectation)
                 raise exc  # noqa: TRY201 # FIXME CoP
+            change_manager.commit(token) if change_manager else None
 
         return expectation
 
@@ -236,10 +269,43 @@ class ExpectationSuite(SerializableDictDot):
     def save(self) -> None:
         """Save this ExpectationSuite."""
         # TODO: Need to emit an event from here - we've opted out of an ExpectationSuiteUpdated event for now  # noqa: E501 # FIXME CoP
-        if self._include_rendered_content:
-            self.render()
-        key = self._store.get_key(name=self.name, id=self.id)
-        self._store.update(key=key, value=self)
+        change_manager = self._get_change_manager()
+        token = None
+        if change_manager is not None:
+            token = change_manager.begin_write(
+                pending=self,
+                current=change_manager.get_current(self.name),
+                source=ChangeSource.SAVE,
+            )
+        try:
+            if self._include_rendered_content:
+                self.render()
+            key = self._store.get_key(name=self.name, id=self.id)
+            self._store.update(key=key, value=self)
+        except Exception:
+            change_manager.discard(token) if change_manager else None
+            raise
+        change_manager.commit(token) if change_manager else None
+
+    def _get_change_manager(self) -> Optional[SuiteChangeManager]:
+        """The active SuiteChangeManager, if change management is enabled.
+
+        Returns None for the default (disabled) configuration, unit-test mocks
+        and contexts without a suite factory, so existing write paths are
+        untouched.
+        """
+        try:
+            from great_expectations.core.factory.suite_factory import SuiteFactory
+
+            factory = project_manager.get_suite_factory()
+        except Exception:
+            return None
+        if not isinstance(factory, SuiteFactory):
+            return None
+        manager = factory._change_manager
+        if manager.enabled and not manager.is_suppressed():
+            return manager
+        return None
 
     def is_fresh(self) -> ExpectationSuiteFreshnessDiagnostics:
         diagnostics = self._is_added()
@@ -288,7 +354,22 @@ class ExpectationSuite(SerializableDictDot):
         return self._store.has_key(key=key)
 
     def _save_expectation(self, expectation) -> Expectation:
-        expectation = self._store.update_expectation(suite=self, expectation=expectation)
+        change_manager = self._get_change_manager()
+        token = None
+        if change_manager is not None:
+            # The mutated expectation is already held by self, so self is the
+            # prospective post-write state.
+            token = change_manager.begin_write(
+                pending=self,
+                current=change_manager.get_current(self.name),
+                source=ChangeSource.UPDATE_EXPECTATION,
+            )
+        try:
+            expectation = self._store.update_expectation(suite=self, expectation=expectation)
+        except Exception:
+            change_manager.discard(token) if change_manager else None
+            raise
+        change_manager.commit(token) if change_manager else None
         return expectation
 
     @property

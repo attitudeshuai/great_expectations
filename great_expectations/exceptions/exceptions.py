@@ -58,6 +58,50 @@ class ExpectationSuiteError(DataContextError):
     pass
 
 
+class SuiteChangeManagementError(ExpectationSuiteError):
+    """Raised when ExpectationSuite change preview / versioning is misconfigured or misused."""
+
+
+class SuiteVersionNotFoundError(ExpectationSuiteError):
+    def __init__(
+        self,
+        name: str,
+        version: int | None = None,
+        at: str | None = None,
+        retained_versions: list[int] | None = None,
+    ) -> None:
+        retained_versions = retained_versions or []
+        if version is not None:
+            target = f"version {version}"
+        else:
+            target = f"a version as of {at}"
+        if retained_versions:
+            retained_range = (
+                f"{min(retained_versions)} through {max(retained_versions)} "
+                f"({len(retained_versions)} version(s) retained)"
+            )
+        else:
+            retained_range = "no versions are currently retained"
+        super().__init__(
+            f"Could not find {target} of ExpectationSuite '{name}'. "
+            f"The version may never have existed or may have been pruned. "
+            f"Currently retained versions: {retained_range}."
+        )
+
+
+class SuiteReferenceConflictError(ExpectationSuiteError):
+    def __init__(self, name: str, affected_references: list[dict]) -> None:
+        rendered = ", ".join(
+            f"{ref.get('kind', 'reference')} '{ref.get('name', '?')}'"
+            for ref in affected_references
+        )
+        super().__init__(
+            f"Cannot write ExpectationSuite '{name}': expectations that would be modified or "
+            f"removed are still referenced by: {rendered}. Resolve the references or change the "
+            f"conflict policy to 'warn'/'ignore'."
+        )
+
+
 class ValidationDefinitionError(DataContextError):
     pass
 
