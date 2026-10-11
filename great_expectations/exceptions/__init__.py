@@ -62,6 +62,8 @@ from .exceptions import (
     UnhashableColumnError,
     UnsupportedConfigVersionError,
     ValidationError,
+    ValidationRunNotFoundError,
+    ValidationRunResultsCleanedError,
 )
 from .resource_freshness import (
     BatchDefinitionNotAddedError,

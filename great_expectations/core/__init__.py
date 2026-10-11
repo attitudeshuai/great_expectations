@@ -17,21 +17,35 @@ from .expectation_validation_result import (
 )
 from .id_dict import IDDict
 from .result_format import ResultFormat
+from .run_comparison import (
+    BatchComparison,
+    ComparisonThresholds,
+    ExpectationComparison,
+    FlipCategory,
+    RunComparisonReport,
+    build_run_comparison,
+)
 from .run_identifier import RunIdentifier, RunIdentifierSchema
 from .validation_definition import ValidationDefinition
 
 __all__ = [
+    "BatchComparison",
+    "ComparisonThresholds",
     "Domain",
+    "ExpectationComparison",
     "ExpectationSuite",
     "ExpectationSuiteSchema",
     "ExpectationSuiteValidationResult",
     "ExpectationSuiteValidationResultSchema",
     "ExpectationValidationResult",
     "ExpectationValidationResultSchema",
+    "FlipCategory",
     "IDDict",
+    "RunComparisonReport",
     "RunIdentifier",
     "RunIdentifierSchema",
     "ValidationDefinition",
+    "build_run_comparison",
     "expectationSuiteSchema",
     "expectationSuiteValidationResultSchema",
     "expectationValidationResultSchema",

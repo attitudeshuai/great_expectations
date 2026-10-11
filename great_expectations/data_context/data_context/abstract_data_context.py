@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import copy
+import datetime
 import logging
 import os
 import pathlib
@@ -56,6 +57,15 @@ from great_expectations.core.factory import (
     SuiteFactory,
     ValidationDefinitionFactory,
 )
+from great_expectations.core.run_comparison import (
+    ComparisonThresholds,
+    RunComparisonReport,
+    build_run_comparison,
+    coerce_max_results,
+    coerce_run_id,
+    coerce_time_window,
+    order_runs,
+)
 from great_expectations.core.yaml_handler import YAMLHandler
 from great_expectations.data_context.store import Store, TupleStoreBackend
 from great_expectations.data_context.templates import CONFIG_VARIABLES_TEMPLATE
@@ -92,6 +102,7 @@ if TYPE_CHECKING:
     from great_expectations.core.expectation_validation_result import (
         ExpectationValidationResult,
     )
+    from great_expectations.core.run_identifier import RunIdentifier
     from great_expectations.core.suite_parameters import SuiteParameterDict
     from great_expectations.data_context.data_context_variables import (
         DataContextVariables,
@@ -2063,6 +2074,85 @@ class AbstractDataContext(ConfigPeer, ABC):
                 expectation_validation_result.render()
 
         return validation_result
+
+    @public_api
+    def compare_validation_runs(  # noqa: PLR0913 # FIXME CoP
+        self,
+        expectation_suite_name: str,
+        run_id: Union[RunIdentifier, dict, str],
+        other_run_id: Optional[Union[RunIdentifier, dict, str]] = None,
+        window_start: Optional[Union[datetime.datetime, str]] = None,
+        window_end: Optional[Union[datetime.datetime, str]] = None,
+        time_window: Optional[datetime.timedelta] = None,
+        max_results: Optional[int] = None,
+        thresholds: Optional[Union[ComparisonThresholds, dict]] = None,
+        validation_results_store_name: Optional[str] = None,
+    ) -> RunComparisonReport:
+        """Compare validation results between two runs of the same expectation suite.
+
+        Read-only: this method does not write results or modify run statistics. Supply either
+        two run identifiers (``run_id`` and ``other_run_id``) or one run identifier plus a time
+        window (``window_start`` / ``window_end``). Results are aligned by batch and expectation,
+        and each expectation's old/new outcome, flip category, observed value, unexpected count,
+        and unexpected percent change are itemized.
+
+        Args:
+            expectation_suite_name: The name of the expectation suite both runs validated.
+            run_id: The run identifier of one of the two runs. When two runs are given, the
+                earlier run (by run_time) is treated as the old run and the later as the new run.
+            other_run_id: The run identifier of the other run. Omit to resolve the other run
+                from the time window.
+            window_start: Inclusive start of the time window (``[start, end)``); a datetime or
+                ISO string. Defaults to ``window_end - time_window``.
+            window_end: Exclusive end of the time window; a datetime or ISO string. Defaults to
+                ``window_start + time_window``, or the supplied run's time when both bounds are
+                omitted.
+            time_window: Default window size when bounds are omitted (default 7 days).
+            max_results: Maximum number of validation result records (run x batch) allowed in a
+                single comparison (default 100); requests above the limit are rejected.
+            thresholds: Per-metric thresholds (``observed_value``, ``unexpected_count``,
+                ``unexpected_percent`` in percentage points) as a dict or ComparisonThresholds.
+            validation_results_store_name: The validation results store to read (defaults to the
+                context's configured validation results store).
+
+        Raises:
+            ValidationRunNotFoundError: A supplied run identifier does not exist in the store.
+            ValidationRunResultsCleanedError: The run exists but results for the suite were
+                cleaned.
+            InvalidConfigError: Window bounds are reversed, thresholds or limits are invalid, or
+                the comparison exceeds ``max_results``.
+        """
+        if validation_results_store_name is None:
+            validation_results_store_name = self.validation_results_store_name
+        selected_store = self.stores[validation_results_store_name]
+
+        if selected_store.cloud_mode:
+            raise gx_exceptions.InvalidConfigError(  # noqa: TRY003 # FIXME CoP
+                "compare_validation_runs is not supported against a GX Cloud validation results "
+                "store; use a store with a tuple backend."
+            )
+
+        anchor_run_id = coerce_run_id(run_id, "run_id")
+        old_run_id: Optional[RunIdentifier] = None
+        if other_run_id is not None:
+            old_run_id = coerce_run_id(other_run_id, "other_run_id")
+            order_runs(anchor_run_id, old_run_id)  # validates the runs are distinct
+
+        resolved_time_window = coerce_time_window(time_window)
+        result_limit = coerce_max_results(max_results)
+        resolved_thresholds = ComparisonThresholds.from_dict(thresholds)
+
+        return build_run_comparison(
+            store=selected_store,
+            expectation_suite_name=expectation_suite_name,
+            anchor_run_id=anchor_run_id,
+            other_run_id=old_run_id,
+            window_start=window_start,
+            window_end=window_end,
+            time_window=resolved_time_window,
+            max_results=result_limit,
+            thresholds=resolved_thresholds,
+        )
 
     def _store_metrics(self, requested_metrics, validation_results, target_store_name) -> None:
         """

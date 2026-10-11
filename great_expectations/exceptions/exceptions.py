@@ -94,6 +94,17 @@ class CheckpointRunWithoutValidationDefinitionError(CheckpointError):
         )
 
 
+class ValidationRunNotFoundError(DataContextError):
+    """Raised when a run_id supplied for comparison does not exist in the validation results store."""  # noqa: E501 # FIXME CoP
+
+
+class ValidationRunResultsCleanedError(DataContextError):
+    """Raised when a run exists but no results remain for the specified expectation suite.
+
+    This indicates the results were cleaned/removed after the run identifier was recorded.
+    """
+
+
 class StoreBackendError(DataContextError):
     pass
 
